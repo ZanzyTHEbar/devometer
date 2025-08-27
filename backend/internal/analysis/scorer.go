@@ -4,17 +4,18 @@ import "math"
 
 var (
 	categoryWeights = map[string]float64{
-		"shipping":      0.25,
-		"quality":       0.20,
-		"influence":     0.20,
-		"complexity":    0.15,
-		"collaboration": 0.10,
-		"reliability":   0.07,
-		"novelty":       0.03,
+		"shipping":      0.20,
+		"quality":       0.15,
+		"influence":     0.35, // Increased influence weight significantly
+		"complexity":    0.12,
+		"collaboration": 0.08,
+		"reliability":   0.06,
+		"novelty":       0.04,
 	}
-	// per-category base bias in log-odds space
-	baseBias float64 = 0
-	clipZ    float64 = 3
+	// per-category base bias in log-odds space - increased for higher base scores
+	baseBias   float64 = 1.5 // Increased from 0 to 1.5 to boost base scores
+	scoreScale float64 = 1.2 // Scaling factor to make scores more sensitive to moderate values
+	clipZ      float64 = 3
 )
 
 func sumMap(m map[string]float64) float64 {
@@ -83,7 +84,9 @@ func scoreCategories(f FeatureVector) (categoryEvidences, float64, []Contributor
 
 func AggregateScore(f FeatureVector) ScoreResult {
 	_, L, contribs, breakdown := scoreCategories(f)
-	p := sigmoid(L)
+	// Apply scaling factor to make the sigmoid more sensitive
+	scaledL := L * scoreScale
+	p := sigmoid(scaledL)
 	if p < 0 {
 		p = 0
 	}

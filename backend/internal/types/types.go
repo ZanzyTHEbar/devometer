@@ -11,3 +11,8 @@ type RawEvent struct {
 	Language  string                 `json:"language"`
 	Metadata  map[string]interface{} `json:"metadata"`
 }
+
+// AnalyzeRequest represents the request structure for analyze endpoint
+type AnalyzeRequest struct {
+	Input string `json:"input" binding:"required"`
+}
