@@ -1,0 +1,129 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23"
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: go mod download
+
+      - name: Run tests
+        working-directory: ./backend
+        run: go test ./... -v -coverprofile=coverage.out
+
+      - name: Generate coverage report
+        working-directory: ./backend
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./backend/coverage.out
+          flags: backend
+          name: backend-coverage
+
+  test-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "pnpm"
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        working-directory: ./frontend
+        run: pnpm run type-check
+
+      - name: Lint
+        working-directory: ./frontend
+        run: pnpm run lint
+
+      - name: Run tests
+        working-directory: ./frontend
+        run: pnpm run test:run -- --coverage
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./frontend/coverage/lcov.info
+          flags: frontend
+          name: frontend-coverage
+
+  build-and-deploy:
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend
+        working-directory: ./backend
+        run: |
+          go mod download
+          go build -o cracked-meter ./cmd/server
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: |
+          npm install -g pnpm
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Deploy to staging
+        run: |
+          echo "Deploy to staging environment"
+          # Add your deployment commands here
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"

@@ -1,0 +1,124 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+
+jobs:
+  test:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run linter
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Run type check
+        working-directory: ./frontend
+        run: npm run type-check
+
+      - name: Run tests
+        working-directory: ./frontend
+        run: npm test -- --run --coverage
+
+      - name: Build application
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./frontend/coverage/coverage-final.json
+          flags: frontend
+          name: frontend-coverage
+          fail_ci_if_error: false
+
+  build:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build application
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist/
+          retention-days: 7
+
+  security:
+    name: Security Scan Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run npm audit
+        working-directory: ./frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "./frontend"
+          format: "sarif"
+          output: "trivy-frontend-results.sarif"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-frontend-results.sarif"
