@@ -1,48 +1,83 @@
 package analysis
 
 import (
-	"strings"
+	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/types"
 )
 
-// AnalyzeInput is a temporary analyzer using input-only heuristics.
-// It will be replaced with real adapters (GitHub/X) feeding FeatureVector.
-func AnalyzeInput(input string) ScoreResult {
-	trim := strings.TrimSpace(strings.ToLower(input))
-	L := float64(len(trim))
-	// naive feature seeds based on simple patterns for v0
-	shipping := map[string]float64{
-		"star_velocity": clip(L/50, 0, 2),
-		"merged_prs":    clip(L/60, 0, 2),
+// Analyzer orchestrates the full analysis pipeline
+type Analyzer struct {
+	preprocessor     *Preprocessor
+	calibrationStore *CalibrationStore
+}
+
+// NewAnalyzer creates a new analyzer with all components
+func NewAnalyzer(dataDir string) *Analyzer {
+	return &Analyzer{
+		preprocessor:     NewPreprocessor(5 * 60 * 1000000000), // 5 minutes in nanoseconds
+		calibrationStore: NewCalibrationStore(dataDir),
 	}
-	quality := map[string]float64{
-		"review_depth": clip(L/90, 0, 2),
-		"ci_pass":      0.3,
-	}
-	influence := map[string]float64{
-		"followers": clip(L/70, 0, 2),
-	}
-	complexity := map[string]float64{
-		"lang_entropy": 0.2,
-	}
-	collab := map[string]float64{
-		"unique_collabs": clip(L/100, 0, 2),
-	}
-	reliability := map[string]float64{
-		"revert_rarity": 0.1,
-	}
-	novelty := map[string]float64{
-		"new_topics": 0.05,
+}
+
+// AnalyzeEvents analyzes processed events using the full pipeline
+func (a *Analyzer) AnalyzeEvents(events []types.RawEvent, domain string) (ScoreResult, error) {
+	// Apply preprocessing (anti-gaming rules)
+	processedEvents := a.preprocessor.ProcessEvents(events)
+
+	// Build feature vector from events
+	fv := a.buildFeatureVectorSimple(processedEvents, domain)
+
+	return AggregateScore(fv), nil
+}
+
+// buildFeatureVectorSimple builds a simple FeatureVector from events
+func (a *Analyzer) buildFeatureVectorSimple(events []types.RawEvent, domain string) FeatureVector {
+	fv := FeatureVector{
+		Shipping:      make(map[string]float64),
+		Quality:       make(map[string]float64),
+		Influence:     make(map[string]float64),
+		Complexity:    make(map[string]float64),
+		Collaboration: make(map[string]float64),
+		Reliability:   make(map[string]float64),
+		Novelty:       make(map[string]float64),
+		Coverage:      0.5,
 	}
 
-	fv := FeatureVector{
-		Shipping:      shipping,
-		Quality:       quality,
-		Influence:     influence,
-		Complexity:    complexity,
-		Collaboration: collab,
-		Reliability:   reliability,
-		Novelty:       novelty,
-		Coverage:      0.3,
+	// Simple aggregation for now
+	for _, event := range events {
+		switch event.Type {
+		case "stars":
+			fv.Influence["stars"] += event.Count
+		case "forks":
+			fv.Influence["forks"] += event.Count
+		case "followers":
+			fv.Influence["followers"] += event.Count
+		case "total_stars":
+			fv.Influence["total_stars"] += event.Count
+		}
 	}
-	return AggregateScore(fv)
+
+	// Apply robust z-score transformation
+	calibration, err := a.calibrationStore.LoadCalibration(domain)
+	if err != nil {
+		calibration = a.calibrationStore.getDefaultCalibration()
+	}
+
+	for key, value := range fv.Influence {
+		fv.Influence[key] = RobustZ(value, calibration.Influence)
+	}
+
+	// Boost coverage if we have data
+	if len(events) > 0 {
+		fv.Coverage = 0.8
+	}
+
+	return fv
+}
+
+// Legacy function for backward compatibility
+func AnalyzeInput(input string) ScoreResult {
+	analyzer := NewAnalyzer("./data")
+	events := []types.RawEvent{}
+	result, _ := analyzer.AnalyzeEvents(events, input)
+	return result
 }
