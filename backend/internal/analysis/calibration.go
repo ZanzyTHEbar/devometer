@@ -86,7 +86,7 @@ func (c *CalibrationStore) getDefaultCalibration() *CalibrationData {
 	return &CalibrationData{
 		Shipping:      []float64{0, 1, 2, 5, 10, 20, 50, 100},      // commits/PRs per period
 		Quality:       []float64{0, 0.2, 0.5, 0.8, 0.9, 0.95, 1.0}, // review depth/CI pass rate (capped at 1.0)
-		Influence:     []float64{0, 10, 50, 100, 500, 1000, 5000},  // stars/followers
+		Influence:     []float64{0, 1, 5, 15, 50, 150, 500},        // stars/followers - baseline for preprocessed values
 		Complexity:    []float64{0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0},  // lang entropy/tests ratio
 		Collaboration: []float64{0, 1, 3, 5, 10, 20, 50},           // unique collaborators
 		Reliability:   []float64{0, 0.5, 0.7, 0.8, 0.9, 0.95, 1.0}, // CI pass rate/revert rarity
