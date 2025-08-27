@@ -1,18 +1,60 @@
-import { createSignal, createEffect } from "solid-js";
+import { createSignal, createEffect, For, type Component } from "solid-js";
 
-type MeterProps = {
+interface MeterProps {
   value?: number; // 0-100
-};
+  animated?: boolean;
+}
 
-export default function Meter(props: MeterProps) {
+const Meter: Component<MeterProps> = (props) => {
   const [angle, setAngle] = createSignal(0);
+  const [isAnimating, setIsAnimating] = createSignal(false);
 
   createEffect(() => {
     const v = Math.max(0, Math.min(100, props.value ?? 50));
-    // map 0..100 to -120deg .. 120deg
-    const a = (v / 100) * 240 - 120;
-    setAngle(a);
+    const targetAngle = (v / 100) * 240 - 120; // map 0..100 to -120deg .. 120deg
+
+    if (props.animated !== false) {
+      setIsAnimating(true);
+      // Smooth animation
+      const startAngle = angle();
+      const duration = 1000; // 1 second
+      const startTime = Date.now();
+
+      const animate = () => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+
+        // Easing function for smooth animation
+        const easeOutCubic = 1 - Math.pow(1 - progress, 3);
+        const currentAngle = startAngle + (targetAngle - startAngle) * easeOutCubic;
+
+        setAngle(currentAngle);
+
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          setIsAnimating(false);
+        }
+      };
+
+      requestAnimationFrame(animate);
+    } else {
+      setAngle(targetAngle);
+    }
   });
+
+  // Generate tick marks
+  const ticks = () => {
+    return Array.from({ length: 9 }, (_, i) => {
+      const tickAngle = -120 + i * 30;
+      const isMainTick = i % 2 === 0;
+      return {
+        angle: tickAngle,
+        isMain: isMainTick,
+        label: isMainTick ? `${(i * 12.5).toFixed(0)}` : null,
+      };
+    });
+  };
 
   return (
     <svg
@@ -20,36 +62,50 @@ export default function Meter(props: MeterProps) {
       width="100%"
       height="100%"
       class="pointer-events-none"
+      role="img"
+      aria-label={`Crackedness meter showing ${props.value || 50}%`}
     >
       <defs>
-        <linearGradient id="g1" x1="0" x2="1">
+        <linearGradient id="meterGradient" x1="0" x2="1">
           <stop offset="0%" stop-color="#06b6d4" />
           <stop offset="50%" stop-color="#7c3aed" />
           <stop offset="100%" stop-color="#ef4444" />
         </linearGradient>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="3" result="coloredBlur" />
+          <feMerge>
+            <feMergeNode in="coloredBlur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
       </defs>
 
       <g transform="translate(100,100)">
+        {/* Background arc */}
         <path
           d="M-80,0 A80,80 0 0,1 80,0"
           fill="none"
           stroke="#e6e6e6"
           stroke-width="12"
           stroke-linecap="round"
+          opacity="0.3"
         />
+
+        {/* Active arc with gradient */}
         <path
           d="M-78,0 A78,78 0 0,1 78,0"
           fill="none"
-          stroke="url(#g1)"
+          stroke="url(#meterGradient)"
           stroke-width="10"
           stroke-linecap="round"
           stroke-dasharray="245"
           stroke-dashoffset="0"
           opacity="0.9"
+          filter={isAnimating() ? "url(#glow)" : undefined}
         />
 
-        {/* needle */}
-        <g transform={`rotate(${angle()} )`}>
+        {/* Needle with glow effect */}
+        <g transform={`rotate(${angle()})`}>
           <line
             x1="0"
             y1="0"
@@ -58,24 +114,60 @@ export default function Meter(props: MeterProps) {
             stroke="#111827"
             stroke-width="4"
             stroke-linecap="round"
+            filter={isAnimating() ? "url(#glow)" : undefined}
           />
-          <circle cx="0" cy="0" r="6" fill="#111827" />
+          <circle
+            cx="0"
+            cy="0"
+            r="6"
+            fill="#111827"
+            filter={isAnimating() ? "url(#glow)" : undefined}
+          />
         </g>
 
-        {/* ticks */}
-        {Array.from({ length: 9 }).map((_, i) => {
-          const t = -120 + i * 30;
-          return (
-            <g transform={`rotate(${t}) translate(0,-74)`}>
-              <rect x="-1" y="0" width="2" height="8" fill="#374151" />
+        {/* Tick marks */}
+        <For each={ticks()}>
+          {(tick) => (
+            <g transform={`rotate(${tick.angle}) translate(0,-74)`}>
+              <rect
+                x={tick.isMain ? "-1.5" : "-1"}
+                y="0"
+                width={tick.isMain ? "3" : "2"}
+                height={tick.isMain ? "12" : "8"}
+                fill="#374151"
+                opacity="0.7"
+              />
+              {tick.label && (
+                <text
+                  x="0"
+                  y="-16"
+                  text-anchor="middle"
+                  font-size="8"
+                  fill="#6b7280"
+                  transform={`rotate(${-tick.angle})`}
+                >
+                  {tick.label}
+                </text>
+              )}
             </g>
-          );
-        })}
+          )}
+        </For>
 
-        <text x="0" y="48" text-anchor="middle" font-size="12" fill="#374151">
+        {/* Center hub */}
+        <circle cx="0" cy="0" r="8" fill="#f8fafc" stroke="#374151" stroke-width="2" />
+
+        {/* Label */}
+        <text x="0" y="48" text-anchor="middle" font-size="12" fill="#374151" font-weight="500">
           Crackedness
+        </text>
+
+        {/* Score display */}
+        <text x="0" y="32" text-anchor="middle" font-size="16" fill="#1f2937" font-weight="bold">
+          {Math.round(props.value ?? 50)}%
         </text>
       </g>
     </svg>
   );
-}
+};
+
+export default Meter;
