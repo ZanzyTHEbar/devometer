@@ -126,6 +126,20 @@ export default function Leaderboard(props: LeaderboardProps) {
     }
   };
 
+  const getDisplayName = (entry: LeaderboardEntry) => {
+    // Priority: display_name > github_username > x_username > hash
+    if (entry.display_name && entry.display_name.trim() !== "") {
+      return entry.display_name;
+    }
+    if (entry.github_username) {
+      return `@${entry.github_username}`;
+    }
+    if (entry.x_username) {
+      return entry.x_username;
+    }
+    return `Developer #${entry.developer_hash.substring(0, 8)}`;
+  };
+
   return (
     <div class={`leaderboard-container ${props.className || ""}`}>
       <div class="bg-base-100 rounded-lg shadow-lg p-6">
@@ -329,9 +343,7 @@ export default function Leaderboard(props: LeaderboardProps) {
                             </div>
                             <div>
                               <div class="flex items-center space-x-2">
-                                <h4 class="font-semibold text-lg">
-                                  Developer #{entry.developer_hash.substring(0, 8)}
-                                </h4>
+                                <h4 class="font-semibold text-lg">{getDisplayName(entry)}</h4>
                                 <span
                                   class={`badge badge-sm ${entry.input_type === "combined" ? "badge-success" : entry.input_type === "github" ? "badge-info" : "badge-secondary"}`}
                                 >

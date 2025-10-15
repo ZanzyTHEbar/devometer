@@ -24,6 +24,7 @@ export interface AnalysisResult {
         reliability: number;
         novelty: number;
     };
+    developer_hash?: string;
     user_stats?: UserStats;
 }
 
@@ -54,7 +55,7 @@ export async function analyze(input: string, includeInLeaderboard = false): Prom
     }
 
     try {
-        const response = await fetch("http://localhost:8080/analyze", {
+        const response = await fetch("/api/analyze", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -90,7 +91,7 @@ export async function analyze(input: string, includeInLeaderboard = false): Prom
 // Health check function
 export async function checkHealth(): Promise<boolean> {
     try {
-        const response = await fetch("http://localhost:8080/health");
+        const response = await fetch("/api/health");
         return response.ok;
     } catch {
         return false;
@@ -100,7 +101,7 @@ export async function checkHealth(): Promise<boolean> {
 // Get user statistics
 export async function getUserStats(): Promise<UserStats> {
     try {
-        const response = await fetch("http://localhost:8080/user/stats");
+        const response = await fetch("/api/user/stats");
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
@@ -117,7 +118,7 @@ export async function getUserStats(): Promise<UserStats> {
 // Create payment session
 export async function createPaymentSession(type: "donation" | "unlimited", amount?: number): Promise<PaymentSession> {
     try {
-        const response = await fetch("http://localhost:8080/payment/create-session", {
+        const response = await fetch("/api/payment/create-session", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -148,6 +149,9 @@ export function isRateLimitError(response: ApiResponse): response is RateLimitEr
 export interface LeaderboardEntry {
     id: string;
     developer_hash: string;
+    display_name?: string;
+    github_username?: string;
+    x_username?: string;
     period: string;
     period_start: string;
     period_end: string;
@@ -182,5 +186,27 @@ export async function fetchDeveloperRank(hash: string, period: string): Promise<
     if (!response.ok) {
         throw new Error(`Failed to fetch developer rank: ${response.statusText}`);
     }
+    return response.json();
+}
+
+// Opt into leaderboard
+export async function optInToLeaderboard(developerHash: string, optIn: boolean, displayName?: string): Promise<{ message: string; status: string }> {
+    const response = await fetch("/api/leaderboard/opt-in", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+            developer_hash: developerHash,
+            opt_in: optIn,
+            display_name: displayName || "",
+        }),
+    });
+
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+    }
+
     return response.json();
 }
