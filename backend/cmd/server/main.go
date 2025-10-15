@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -21,8 +22,10 @@ import (
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/analysis"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/cache"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/database"
+	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/encoding"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/errors"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/leaderboard"
+	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/middleware"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/monitoring"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/privacy"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/resilience"
@@ -65,6 +68,13 @@ func main() {
 	// Initialize privacy service
 	privacyService := privacy.NewService(db)
 
+	// Initialize optimized JSON encoder
+	optimizedEncoder := encoding.NewOptimizedJSONEncoder()
+
+	// Initialize compression middleware
+	compressionConfig := middleware.DefaultCompressionConfig()
+	compressionMiddleware := middleware.NewCompressionMiddleware(compressionConfig)
+
 	// Warm up leaderboard cache and start auto-refresh
 	go func() {
 		slog.Info("Warming up leaderboard cache")
@@ -102,6 +112,15 @@ func main() {
 	// Initialize monitoring system
 	appMetrics := monitoring.NewMetrics()
 	appLogger := monitoring.NewLogger()
+
+	// Initialize memory monitor
+	memoryMonitor := monitoring.NewMemoryMonitor(5*time.Second, 50*1024*1024, appLogger) // 50MB GC threshold
+	memoryMonitor.Start()
+
+	// Add compression middleware
+	r.Use(gin.HandlerFunc(func(c *gin.Context) {
+		compressionMiddleware.Handler()(c.Writer, c.Request)
+	}))
 
 	// Initialize distributed tracing
 	monitoring.InitGlobalTracer("cracked-dev-o-meter", appLogger)
@@ -687,6 +706,81 @@ func main() {
 		c.JSON(http.StatusOK, stats)
 	})
 
+	// Connection pool stats endpoints
+	r.GET("/pools/github", func(c *gin.Context) {
+		stats := githubAdapter.GetPoolStats()
+		c.JSON(http.StatusOK, gin.H{
+			"pool":  "github",
+			"stats": stats,
+		})
+	})
+
+	r.GET("/pools/x", func(c *gin.Context) {
+		stats := xAdapter.GetPoolStats()
+		c.JSON(http.StatusOK, gin.H{
+			"pool":  "x",
+			"stats": stats,
+		})
+	})
+
+	// Database pool stats endpoint
+	r.GET("/pools/database", func(c *gin.Context) {
+		stats := db.GetPoolStats()
+		c.JSON(http.StatusOK, gin.H{
+			"pool":  "database",
+			"stats": stats,
+		})
+	})
+
+	// JSON encoder stats endpoint
+	r.GET("/pools/json", func(c *gin.Context) {
+		stats := optimizedEncoder.GetStats()
+		c.JSON(http.StatusOK, gin.H{
+			"pool":  "json",
+			"stats": stats,
+		})
+	})
+
+	// Compression stats endpoint
+	r.GET("/pools/compression", func(c *gin.Context) {
+		stats := compressionMiddleware.GetStats()
+		c.JSON(http.StatusOK, gin.H{
+			"pool":  "compression",
+			"stats": stats,
+		})
+	})
+
+	// Memory stats endpoint
+	r.GET("/memory", func(c *gin.Context) {
+		stats := memoryMonitor.GetStats()
+		c.JSON(http.StatusOK, stats)
+	})
+
+	// Memory optimization endpoint
+	r.POST("/memory/optimize", func(c *gin.Context) {
+		memoryMonitor.OptimizeMemory()
+		c.JSON(http.StatusOK, gin.H{"message": "memory optimization triggered"})
+	})
+
+	// Force GC endpoint (development only)
+	if os.Getenv("ENABLE_GC_CONTROL") == "true" {
+		r.POST("/memory/gc", func(c *gin.Context) {
+			memoryMonitor.ForceGC()
+			c.JSON(http.StatusOK, gin.H{"message": "garbage collection triggered"})
+		})
+	}
+
+	// Performance profiling endpoints (development only)
+	if os.Getenv("ENABLE_PROFILING") == "true" {
+		slog.Info("Enabling performance profiling endpoints")
+		// Mount pprof endpoints
+		r.GET("/debug/pprof/*filepath", gin.WrapF(pprof.Index))
+		r.GET("/debug/pprof/cmdline", gin.WrapF(pprof.Cmdline))
+		r.GET("/debug/pprof/profile", gin.WrapF(pprof.Profile))
+		r.GET("/debug/pprof/symbol", gin.WrapF(pprof.Symbol))
+		r.GET("/debug/pprof/trace", gin.WrapF(pprof.Trace))
+	}
+
 	// Leaderboard endpoints
 	r.GET("/leaderboard/:period", func(c *gin.Context) {
 		period := c.Param("period")
@@ -815,6 +909,13 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Close adapter connection pools
+	githubAdapter.Close()
+	xAdapter.Close()
+
+	// Stop memory monitor
+	memoryMonitor.Stop()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("Server forced to shutdown", "error", err)

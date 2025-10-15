@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/resilience"
 )
 
 // XEvent represents a raw event from X (Twitter)
@@ -33,18 +35,26 @@ type XAuthConfig struct {
 
 // XAdapter fetches data from X (Twitter) API
 type XAdapter struct {
-	config     XAuthConfig
-	httpClient *http.Client
-	baseURL    string
+	config  XAuthConfig
+	pool    *resilience.ConnectionPool
+	baseURL string
 }
 
-// NewXAdapter creates a new X adapter with authentication
+// NewXAdapter creates a new X adapter with authentication and connection pooling
 func NewXAdapter(config XAuthConfig) *XAdapter {
+	// Create circuit breaker for X API
+	cb := resilience.NewCircuitBreaker(resilience.CircuitBreakerConfig{
+		FailureThreshold: 5,
+		RecoveryTimeout:  30 * time.Second,
+		SuccessThreshold: 3,
+	})
+
+	// Create connection pool
+	pool := resilience.NewConnectionPool(10, 20, 30*time.Second, cb)
+
 	return &XAdapter{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		config:  config,
+		pool:    pool,
 		baseURL: "https://api.twitter.com/2",
 	}
 }
@@ -98,18 +108,13 @@ func (x *XAdapter) makeRequest(ctx context.Context, method, endpoint string, par
 		fullURL += "?" + values.Encode()
 	}
 
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	// Make request using connection pool
+	headers := map[string]string{
+		"Authorization": "Bearer " + x.config.BearerToken,
+		"Content-Type":  "application/json",
 	}
 
-	// Add authentication header
-	req.Header.Set("Authorization", "Bearer "+x.config.BearerToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	// Make request
-	resp, err := x.httpClient.Do(req)
+	resp, err := x.pool.DoRequest(ctx, method, fullURL, headers)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -913,4 +918,14 @@ func generateHashtagCount(hashtag string, hourOffset int) float64 {
 	}
 
 	return float64(base) * timeMultiplier
+}
+
+// GetPoolStats returns connection pool statistics
+func (x *XAdapter) GetPoolStats() map[string]interface{} {
+	return x.pool.GetStats()
+}
+
+// Close closes the connection pool
+func (x *XAdapter) Close() error {
+	return x.pool.Close()
 }

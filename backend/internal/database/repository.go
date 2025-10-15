@@ -18,24 +18,29 @@ func NewRepository(db *DB) *Repository {
 
 // GetOrCreateUser gets an existing user or creates a new one based on IP address
 func (r *Repository) GetOrCreateUser(ipAddress, userAgent string) (*User, error) {
-	// Try to find existing user by IP
+	// Try to find existing user by IP using prepared statement
+	stmt, err := r.db.GetPreparedStatement("get_user_by_ip")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get prepared statement: %w", err)
+	}
+
 	var user User
-	err := r.db.QueryRow(`
-		SELECT id, email, ip_address, user_agent, is_paid, stripe_customer_id, created_at, updated_at
-		FROM users
-		WHERE ip_address = ?
-		ORDER BY created_at DESC
-		LIMIT 1
-	`, ipAddress).Scan(
+	now := time.Now()
+	err = stmt.QueryRow(ipAddress).Scan(
 		&user.ID, &user.Email, &user.IPAddress, &user.UserAgent,
 		&user.IsPaid, &user.StripeID, &user.CreatedAt, &user.UpdatedAt,
 	)
 
 	if err == nil {
 		// User exists, update last seen
-		_, err = r.db.Exec(`
-			UPDATE users SET updated_at = ?, user_agent = ? WHERE id = ?
-		`, time.Now(), userAgent, user.ID)
+		updateStmt, err := r.db.GetPreparedStatement("insert_user")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get update statement: %w", err)
+		}
+
+		_, err = updateStmt.Exec(
+			user.ID, user.Email, ipAddress, userAgent, user.IsPaid, user.StripeID, now, now,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update user: %w", err)
 		}
@@ -48,10 +53,14 @@ func (r *Repository) GetOrCreateUser(ipAddress, userAgent string) (*User, error)
 
 	// User doesn't exist, create new one
 	user = *NewUser(ipAddress, userAgent)
-	_, err = r.db.Exec(`
-		INSERT INTO users (id, email, ip_address, user_agent, is_paid, stripe_customer_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, user.ID, user.Email, user.IPAddress, user.UserAgent, user.IsPaid, user.StripeID, user.CreatedAt, user.UpdatedAt)
+	insertStmt, err := r.db.GetPreparedStatement("insert_user")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get insert statement: %w", err)
+	}
+
+	_, err = insertStmt.Exec(
+		user.ID, user.Email, user.IPAddress, user.UserAgent, user.IsPaid, user.StripeID, user.CreatedAt, user.UpdatedAt,
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
@@ -63,11 +72,12 @@ func (r *Repository) GetOrCreateUser(ipAddress, userAgent string) (*User, error)
 // LogRequest logs an API request
 func (r *Repository) LogRequest(userID, ipAddress, endpoint, method, userAgent string) error {
 	reqLog := NewRequestLog(userID, ipAddress, endpoint, method, userAgent)
-	_, err := r.db.Exec(`
-		INSERT INTO request_logs (id, user_id, ip_address, endpoint, method, user_agent, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, reqLog.ID, reqLog.UserID, reqLog.IPAddress, reqLog.Endpoint, reqLog.Method, reqLog.UserAgent, reqLog.CreatedAt)
+	stmt, err := r.db.GetPreparedStatement("insert_request_log")
+	if err != nil {
+		return fmt.Errorf("failed to get prepared statement: %w", err)
+	}
 
+	_, err = stmt.Exec(reqLog.ID, reqLog.UserID, reqLog.IPAddress, reqLog.Endpoint, reqLog.Method, reqLog.UserAgent, reqLog.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to log request: %w", err)
 	}
@@ -135,11 +145,14 @@ func (r *Repository) CanMakeRequest(userID string) (bool, *UsageStats, error) {
 
 // UpdateUserPaymentStatus updates a user's payment status
 func (r *Repository) UpdateUserPaymentStatus(userID string, isPaid bool, stripeCustomerID string) error {
-	_, err := r.db.Exec(`
-		UPDATE users SET is_paid = ?, stripe_customer_id = ?, updated_at = ?
-		WHERE id = ?
-	`, isPaid, stripeCustomerID, time.Now(), userID)
+	stmt, err := r.db.GetPreparedStatement("insert_user")
+	if err != nil {
+		return fmt.Errorf("failed to get prepared statement: %w", err)
+	}
 
+	_, err = stmt.Exec(
+		userID, "", "", "", isPaid, stripeCustomerID, time.Now(), time.Now(),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to update user payment status: %w", err)
 	}
@@ -160,11 +173,15 @@ func (r *Repository) CreatePayment(userID, stripePaymentID, currency, status, pa
 		CreatedAt:       time.Now(),
 	}
 
-	_, err := r.db.Exec(`
-		INSERT INTO payments (id, user_id, stripe_payment_id, amount, currency, status, type, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, payment.ID, payment.UserID, payment.StripePaymentID, payment.Amount,
-		payment.Currency, payment.Status, payment.Type, payment.CreatedAt)
+	stmt, err := r.db.GetPreparedStatement("insert_payment")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get prepared statement: %w", err)
+	}
+
+	_, err = stmt.Exec(
+		payment.ID, payment.UserID, payment.StripePaymentID, payment.Amount,
+		payment.Currency, payment.Status, payment.Type, payment.CreatedAt,
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create payment: %w", err)

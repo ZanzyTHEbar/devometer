@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/analysis"
 	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/database"
-	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/types"
 	"github.com/google/uuid"
 )
 
@@ -79,7 +79,7 @@ func NewServiceWithCache(db *database.DB, cache *LeaderboardCache) *Service {
 }
 
 // SaveAnalysis saves a developer analysis result
-func (s *Service) SaveAnalysis(result types.AnalysisResult, input, inputType, ipAddress, userAgent string, githubUsername, xUsername *string, isPublic bool) error {
+func (s *Service) SaveAnalysis(result analysis.ScoreResult, input, inputType, ipAddress, userAgent string, githubUsername, xUsername *string, isPublic bool) error {
 	id := uuid.New().String()
 	now := time.Now()
 
