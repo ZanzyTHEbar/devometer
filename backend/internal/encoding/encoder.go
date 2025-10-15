@@ -56,8 +56,8 @@ func (ep *EncoderPool) ReturnEncoder(encoder *json.Encoder) {
 	}
 }
 
-// MarshalJSON marshals data using the encoder pool for better performance
-func (ep *EncoderPool) MarshalJSON(v interface{}) ([]byte, error) {
+// Marshal marshals data using the encoder pool for better performance
+func (ep *EncoderPool) Marshal(v interface{}) ([]byte, error) {
 	encoder := ep.GetEncoder()
 	defer ep.ReturnEncoder(encoder)
 
@@ -112,18 +112,6 @@ func (dp *DecoderPool) GetDecoder(data []byte) *json.Decoder {
 	return json.NewDecoder(bytes.NewReader(data))
 }
 
-// getDecoder gets a decoder from the pool or creates a new one
-func (dp *DecoderPool) getDecoder() *json.Decoder {
-	select {
-	case decoder := <-dp.pool:
-		return decoder
-	default:
-		// Pool exhausted, create new decoder
-		slog.Debug("Decoder pool exhausted, creating new decoder")
-		return json.NewDecoder(bytes.NewReader([]byte{}))
-	}
-}
-
 // ReturnDecoder returns a decoder to the pool
 func (dp *DecoderPool) ReturnDecoder(decoder *json.Decoder) {
 	select {
@@ -135,8 +123,8 @@ func (dp *DecoderPool) ReturnDecoder(decoder *json.Decoder) {
 	}
 }
 
-// UnmarshalJSON unmarshals data using the decoder pool for better performance
-func (dp *DecoderPool) UnmarshalJSON(data []byte, v interface{}) error {
+// Unmarshal unmarshals data using the decoder pool for better performance
+func (dp *DecoderPool) Unmarshal(data []byte, v interface{}) error {
 	decoder := dp.GetDecoder(data)
 	defer dp.ReturnDecoder(decoder)
 
@@ -159,12 +147,12 @@ func NewOptimizedJSONEncoder() *OptimizedJSONEncoder {
 
 // Marshal marshals data with high performance
 func (oje *OptimizedJSONEncoder) Marshal(v interface{}) ([]byte, error) {
-	return oje.encoderPool.MarshalJSON(v)
+	return oje.encoderPool.Marshal(v)
 }
 
 // Unmarshal unmarshals data with high performance
 func (oje *OptimizedJSONEncoder) Unmarshal(data []byte, v interface{}) error {
-	return oje.decoderPool.UnmarshalJSON(data, v)
+	return oje.decoderPool.Unmarshal(data, v)
 }
 
 // GetStats returns encoder/decoder pool statistics

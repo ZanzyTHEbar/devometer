@@ -89,12 +89,6 @@ func (cp *ConnectionPool) GetClient() (*http.Client, error) {
 		Timeout:   30 * time.Second,
 	}
 
-	_ = &pooledConnection{
-		client:   client,
-		lastUsed: time.Now(),
-		inUse:    true,
-	}
-
 	cp.activeConnections++
 
 	slog.Debug("Created new connection", "active", cp.activeConnections, "idle", len(cp.idleConnections))

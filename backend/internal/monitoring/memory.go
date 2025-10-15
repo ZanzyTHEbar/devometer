@@ -39,7 +39,6 @@ type MemoryStats struct {
 
 	// Timestamps
 	Timestamp time.Time `json:"timestamp"`
-	mutex     sync.RWMutex
 }
 
 // MemoryMonitor monitors memory usage and GC performance

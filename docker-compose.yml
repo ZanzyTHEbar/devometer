@@ -12,8 +12,17 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - X_BEARER_TOKEN=${X_BEARER_TOKEN}
       - PORT=8080
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=0
+      - REDIS_ENABLED=${REDIS_ENABLED:-true}
+      - RATE_LIMIT_IP_PER_MIN=${RATE_LIMIT_IP_PER_MIN:-60}
+      - RATE_LIMIT_USER_PER_WEEK=${RATE_LIMIT_USER_PER_WEEK:-5}
     volumes:
       - backend_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
@@ -34,6 +43,20 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8080
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
   nginx:
     image: nginx:alpine
     ports:
@@ -45,6 +68,7 @@ services:
     depends_on:
       - backend
       - frontend
+      - redis
     restart: unless-stopped
     environment:
       - DOMAIN_NAME=${DOMAIN_NAME:-localhost}
@@ -53,3 +77,4 @@ services:
 
 volumes:
   backend_data:
+  redis_data:

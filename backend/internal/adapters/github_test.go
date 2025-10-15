@@ -44,7 +44,7 @@ func TestGitHubAdapter_FetchRepoData(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		ctx      interface{}
+		ctx      context.Context
 		owner    string
 		repo     string
 		expected []GitHubEvent
@@ -223,7 +223,7 @@ func TestGitHubAdapter_FetchUserData(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		ctx      interface{}
+		ctx      context.Context
 		username string
 		expected []GitHubEvent
 		hasError bool
@@ -486,7 +486,7 @@ func TestGitHubAdapter_ContextHandling(t *testing.T) {
 	adapter := NewGitHubAdapter("test_token")
 
 	// Test with different context types
-	contexts := []interface{}{
+	contexts := []context.Context{
 		context.Background(),
 		context.TODO(),
 		nil,

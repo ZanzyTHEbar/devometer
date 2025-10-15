@@ -40,16 +40,25 @@ type Metrics struct {
 	GCPauseTotalNs int64
 	HeapAlloc      int64
 	HeapSys        int64
+
+	// Rate limit metrics
+	RateLimitIPBlocks      int64
+	RateLimitUserBlocks    int64
+	RateLimitRedisErrors   int64
+	RateLimitFallbackCount int64
+	RateLimitEndpointBlocks map[string]int64
+	RateLimitMutex         sync.RWMutex
 }
 
 // NewMetrics creates a new metrics instance
 func NewMetrics() *Metrics {
 	return &Metrics{
-		StartTime:             time.Now(),
-		ResponseTimes:         make([]time.Duration, 0, 1000), // Pre-allocate for better performance
-		RequestCountByStatus:  make(map[int]int64),
-		ExternalAPIRequests:   make(map[string]int64),
-		ExternalAPIErrorCount: make(map[string]int64),
+		StartTime:               time.Now(),
+		ResponseTimes:           make([]time.Duration, 0, 1000), // Pre-allocate for better performance
+		RequestCountByStatus:    make(map[int]int64),
+		ExternalAPIRequests:     make(map[string]int64),
+		ExternalAPIErrorCount:   make(map[string]int64),
+		RateLimitEndpointBlocks: make(map[string]int64),
 	}
 }
 
@@ -292,5 +301,54 @@ func (m *Metrics) Reset() {
 	m.ExternalAPIErrorCount = make(map[string]int64)
 	m.ExternalAPIMutex.Unlock()
 
+	m.RateLimitMutex.Lock()
+	m.RateLimitEndpointBlocks = make(map[string]int64)
+	m.RateLimitMutex.Unlock()
+
 	m.StartTime = time.Now()
+}
+
+// IncrementRateLimitIPBlock increments IP-based rate limit blocks
+func (m *Metrics) IncrementRateLimitIPBlock() {
+	atomic.AddInt64(&m.RateLimitIPBlocks, 1)
+}
+
+// IncrementRateLimitUserBlock increments user-based rate limit blocks
+func (m *Metrics) IncrementRateLimitUserBlock() {
+	atomic.AddInt64(&m.RateLimitUserBlocks, 1)
+}
+
+// IncrementRateLimitRedisError increments Redis error count for rate limiting
+func (m *Metrics) IncrementRateLimitRedisError() {
+	atomic.AddInt64(&m.RateLimitRedisErrors, 1)
+}
+
+// IncrementRateLimitFallback increments fallback rate limiter usage count
+func (m *Metrics) IncrementRateLimitFallback() {
+	atomic.AddInt64(&m.RateLimitFallbackCount, 1)
+}
+
+// IncrementRateLimitEndpoint increments rate limit blocks for a specific endpoint
+func (m *Metrics) IncrementRateLimitEndpoint(endpoint string) {
+	m.RateLimitMutex.Lock()
+	defer m.RateLimitMutex.Unlock()
+	m.RateLimitEndpointBlocks[endpoint]++
+}
+
+// GetRateLimitStats returns rate limiting statistics
+func (m *Metrics) GetRateLimitStats() map[string]interface{} {
+	m.RateLimitMutex.RLock()
+	endpointBlocksCopy := make(map[string]int64, len(m.RateLimitEndpointBlocks))
+	for k, v := range m.RateLimitEndpointBlocks {
+		endpointBlocksCopy[k] = v
+	}
+	m.RateLimitMutex.RUnlock()
+
+	return map[string]interface{}{
+		"ip_blocks":       atomic.LoadInt64(&m.RateLimitIPBlocks),
+		"user_blocks":     atomic.LoadInt64(&m.RateLimitUserBlocks),
+		"redis_errors":    atomic.LoadInt64(&m.RateLimitRedisErrors),
+		"fallback_count":  atomic.LoadInt64(&m.RateLimitFallbackCount),
+		"endpoint_blocks": endpointBlocksCopy,
+	}
 }

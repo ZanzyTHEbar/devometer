@@ -322,11 +322,13 @@ func (am *AlertManager) SilenceAlert(alertID string, duration time.Duration) {
 
 // Simulate metric getters (in a real implementation, these would query actual metrics)
 func (am *AlertManager) getCurrentErrorRate(service string) float64 {
+	_ = service // Intentionally unused in simulation; used in real metrics query
 	// Simplified - in practice, this would query actual metrics
 	return 5.0 // 5% error rate
 }
 
 func (am *AlertManager) getCurrentResponseTime(service string) float64 {
+	_ = service // Intentionally unused in simulation; used in real metrics query
 	// Simplified - in practice, this would query actual metrics
 	return 150.0 // 150ms average response time
 }
