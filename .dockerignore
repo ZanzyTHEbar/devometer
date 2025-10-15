@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Node modules (will be reinstalled)
+frontend/node_modules
+frontend/.vite
+
+# Go build artifacts
+backend/main
+backend/*.exe
+backend/*.test
+bin/
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+**/*_test.go
+frontend/src/**/*.test.ts
+frontend/src/**/*.test.tsx
+
+# Coverage
+coverage/
+*.out
+
+# Backend embedded frontend (will be copied from frontend-builder)
+backend/internal/frontend/dist
+
