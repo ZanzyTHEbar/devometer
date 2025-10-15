@@ -34,17 +34,20 @@ type DeveloperAnalysis struct {
 
 // LeaderboardEntry represents a leaderboard ranking
 type LeaderboardEntry struct {
-	ID            string    `json:"id"`
-	DeveloperHash string    `json:"developer_hash"`
-	Period        string    `json:"period"`
-	PeriodStart   time.Time `json:"period_start"`
-	PeriodEnd     time.Time `json:"period_end"`
-	Rank          int       `json:"rank"`
-	Score         float64   `json:"score"`
-	Confidence    float64   `json:"confidence"`
-	InputType     string    `json:"input_type"`
-	IsPublic      bool      `json:"is_public"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	DeveloperHash  string    `json:"developer_hash"`
+	DisplayName    *string   `json:"display_name,omitempty"`
+	GitHubUsername *string   `json:"github_username,omitempty"`
+	XUsername      *string   `json:"x_username,omitempty"`
+	Period         string    `json:"period"`
+	PeriodStart    time.Time `json:"period_start"`
+	PeriodEnd      time.Time `json:"period_end"`
+	Rank           int       `json:"rank"`
+	Score          float64   `json:"score"`
+	Confidence     float64   `json:"confidence"`
+	InputType      string    `json:"input_type"`
+	IsPublic       bool      `json:"is_public"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // LeaderboardResponse represents the response for leaderboard queries
@@ -79,7 +82,7 @@ func NewServiceWithCache(db *database.DB, cache *LeaderboardCache) *Service {
 }
 
 // SaveAnalysis saves a developer analysis result
-func (s *Service) SaveAnalysis(result analysis.ScoreResult, input, inputType, ipAddress, userAgent string, githubUsername, xUsername *string, isPublic bool) error {
+func (s *Service) SaveAnalysis(result analysis.ScoreResult, input, inputType, ipAddress, userAgent string, githubUsername, xUsername *string, displayName string, isPublic bool) error {
 	id := uuid.New().String()
 	now := time.Now()
 
@@ -93,12 +96,16 @@ func (s *Service) SaveAnalysis(result analysis.ScoreResult, input, inputType, ip
 		return fmt.Errorf("failed to marshal breakdown: %w", err)
 	}
 
+	// Default opt-in status to pending
+	optInStatus := "pending"
+	var optInAt *time.Time
+
 	query := `
 		INSERT INTO developer_analyses (
 			id, developer_hash, input_type, input_value, score, confidence, posterior,
-			breakdown, github_username, x_username, ip_address, user_agent,
-			is_public, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			breakdown, github_username, x_username, display_name, ip_address, user_agent,
+			is_public, leaderboard_opt_in_status, leaderboard_opt_in_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(developer_hash) DO UPDATE SET
 			score = excluded.score,
 			confidence = excluded.confidence,
@@ -109,12 +116,24 @@ func (s *Service) SaveAnalysis(result analysis.ScoreResult, input, inputType, ip
 
 	_, err = s.db.Exec(query,
 		id, developerHash, inputType, input, result.Score, result.Confidence, result.Posterior,
-		string(breakdownJSON), githubUsername, xUsername, ipAddress, userAgent,
-		isPublic, now, now,
+		string(breakdownJSON), githubUsername, xUsername, displayName, ipAddress, userAgent,
+		isPublic, optInStatus, optInAt, now, now,
 	)
 
 	if err != nil {
 		return fmt.Errorf("failed to save analysis: %w", err)
+	}
+
+	// Save to analysis_history for weighted scoring
+	historyID := uuid.New().String()
+	historyQuery := `
+		INSERT INTO analysis_history (id, developer_hash, analysis_id, score, confidence, input_type, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err = s.db.Exec(historyQuery, historyID, developerHash, id, result.Score, result.Confidence, inputType, now)
+	if err != nil {
+		slog.Error("Failed to save analysis history", "error", err)
+		// Don't fail the whole operation if history save fails
 	}
 
 	slog.Info("Analysis saved to leaderboard",
@@ -123,6 +142,202 @@ func (s *Service) SaveAnalysis(result analysis.ScoreResult, input, inputType, ip
 		"input_type", inputType,
 	)
 
+	return nil
+}
+
+// CalculateWeightedScore calculates weighted average score for a developer
+func (s *Service) CalculateWeightedScore(developerHash string) (float64, float64, error) {
+	query := `
+		SELECT score, confidence, input_type, created_at
+		FROM analysis_history
+		WHERE developer_hash = ?
+		ORDER BY created_at DESC
+		LIMIT 10
+	`
+
+	rows, err := s.db.Query(query, developerHash)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to query analysis history: %w", err)
+	}
+	defer rows.Close()
+
+	var totalWeightedScore, totalWeight float64
+	var analyses []struct {
+		score      float64
+		confidence float64
+		inputType  string
+		createdAt  time.Time
+	}
+
+	for rows.Next() {
+		var a struct {
+			score      float64
+			confidence float64
+			inputType  string
+			createdAt  time.Time
+		}
+		if err := rows.Scan(&a.score, &a.confidence, &a.inputType, &a.createdAt); err != nil {
+			return 0, 0, err
+		}
+		analyses = append(analyses, a)
+	}
+
+	if len(analyses) == 0 {
+		return 0, 0, fmt.Errorf("no analyses found for developer")
+	}
+
+	// Weight calculation:
+	// - More recent analyses have higher weight (exponential decay)
+	// - Higher confidence analyses have higher weight
+	// - Combined analyses get 1.5x weight multiplier
+	for i, a := range analyses {
+		// Time decay: newer = higher weight (0.5 to 1.0 based on position)
+		timeWeight := 1.0 - (float64(i) / float64(len(analyses)) * 0.5)
+
+		// Confidence weight (0.5 to 1.0 based on confidence)
+		confidenceWeight := 0.5 + (a.confidence * 0.5)
+
+		// Input type multiplier
+		typeMultiplier := 1.0
+		if a.inputType == "combined" {
+			typeMultiplier = 1.5
+		}
+
+		// Combined weight
+		weight := timeWeight * confidenceWeight * typeMultiplier
+		totalWeightedScore += a.score * weight
+		totalWeight += weight
+	}
+
+	weightedScore := totalWeightedScore / totalWeight
+	avgConfidence := 0.0
+	for _, a := range analyses {
+		avgConfidence += a.confidence
+	}
+	avgConfidence /= float64(len(analyses))
+
+	return weightedScore, avgConfidence, nil
+}
+
+// UpdateTop10Immediately updates top 10 leaderboard immediately for a developer
+func (s *Service) UpdateTop10Immediately(developerHash string, period string) error {
+	// Calculate new weighted score
+	weightedScore, _, err := s.CalculateWeightedScore(developerHash)
+	if err != nil {
+		return fmt.Errorf("failed to calculate weighted score: %w", err)
+	}
+
+	// Check if this score would place in top 10
+	query := `
+		SELECT COUNT(*) FROM leaderboard_entries
+		WHERE period = ? AND score > ? AND rank <= 10
+	`
+
+	var countAbove int
+	err = s.db.QueryRow(query, period, weightedScore).Scan(&countAbove)
+	if err != nil {
+		return err
+	}
+
+	// If not in top 10 range, skip immediate update
+	if countAbove >= 10 {
+		return nil
+	}
+
+	// Recalculate top 10 ranks for this period
+	return s.updateTop10ForPeriod(period)
+}
+
+// updateTop10ForPeriod updates top 10 leaderboard for a specific period
+func (s *Service) updateTop10ForPeriod(period string) error {
+	now := time.Now()
+	var periodStart, periodEnd time.Time
+
+	switch period {
+	case "daily":
+		periodStart = now.Truncate(24 * time.Hour)
+		periodEnd = periodStart.Add(24 * time.Hour).Add(-time.Nanosecond)
+	case "weekly":
+		days := int(now.Weekday()-time.Monday) % 7
+		periodStart = now.AddDate(0, 0, -days).Truncate(24 * time.Hour)
+		periodEnd = periodStart.Add(7*24*time.Hour - time.Nanosecond)
+	case "monthly":
+		periodStart = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		periodEnd = periodStart.AddDate(0, 1, 0).Add(-time.Nanosecond)
+	case "all_time":
+		periodStart = time.Date(2020, 1, 1, 0, 0, 0, 0, now.Location())
+		periodEnd = now
+	default:
+		return fmt.Errorf("invalid period: %s", period)
+	}
+
+	// Get current top 10 with weighted scores
+	query := `
+		SELECT da.developer_hash, da.input_type, da.github_username, da.x_username, da.display_name
+		FROM developer_analyses da
+		WHERE da.is_public = TRUE
+		ORDER BY (
+			SELECT AVG(ah.score * ah.confidence) 
+			FROM analysis_history ah 
+			WHERE ah.developer_hash = da.developer_hash
+		) DESC
+		LIMIT 10
+	`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query top 10: %w", err)
+	}
+	defer rows.Close()
+
+	// Clear existing top 10 entries for this period
+	_, err = s.db.Exec(`DELETE FROM leaderboard_entries WHERE period = ? AND period_start = ? AND rank <= 10`,
+		period, periodStart.Format("2006-01-02"))
+	if err != nil {
+		return fmt.Errorf("failed to clear top 10 entries: %w", err)
+	}
+
+	rank := 1
+	for rows.Next() {
+		var developerHash, inputType string
+		var githubUsername, xUsername, displayName *string
+
+		if err := rows.Scan(&developerHash, &inputType, &githubUsername, &xUsername, &displayName); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		// Calculate weighted score for this developer
+		weightedScore, avgConfidence, err := s.CalculateWeightedScore(developerHash)
+		if err != nil {
+			slog.Error("Failed to calculate weighted score for top 10", "error", err, "developer_hash", developerHash[:8]+"...")
+			continue
+		}
+
+		entry := LeaderboardEntry{
+			ID:            uuid.New().String(),
+			DeveloperHash: developerHash,
+			Period:        period,
+			PeriodStart:   periodStart,
+			PeriodEnd:     periodEnd,
+			Rank:          rank,
+			Score:         weightedScore,
+			Confidence:    avgConfidence,
+			InputType:     inputType,
+			IsPublic:      true,
+			CreatedAt:     now,
+		}
+
+		if err := s.saveLeaderboardEntry(entry); err != nil {
+			return fmt.Errorf("failed to save top 10 entry: %w", err)
+		}
+
+		rank++
+	}
+
+	// Invalidate top 10 cache entries
+	s.cache.InvalidatePeriod(period)
+
+	slog.Info("Updated top 10 leaderboard", "period", period, "entries", rank-1)
 	return nil
 }
 
@@ -338,11 +553,14 @@ func (s *Service) GetLeaderboard(period string, limit int) (*LeaderboardResponse
 	case "daily":
 		periodStart := now.Truncate(24 * time.Hour)
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE period = ? AND period_start = ?
-			ORDER BY rank ASC
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end,
+				le.rank, le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.period = ? AND le.period_start = ?
+			ORDER BY le.rank ASC
 			LIMIT ?
 		`
 		args = []interface{}{period, periodStart.Format("2006-01-02"), limit}
@@ -351,11 +569,14 @@ func (s *Service) GetLeaderboard(period string, limit int) (*LeaderboardResponse
 		days := int(now.Weekday()-time.Monday) % 7
 		periodStart := now.AddDate(0, 0, -days).Truncate(24 * time.Hour)
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE period = ? AND period_start = ?
-			ORDER BY rank ASC
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end,
+				le.rank, le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.period = ? AND le.period_start = ?
+			ORDER BY le.rank ASC
 			LIMIT ?
 		`
 		args = []interface{}{period, periodStart.Format("2006-01-02"), limit}
@@ -363,22 +584,28 @@ func (s *Service) GetLeaderboard(period string, limit int) (*LeaderboardResponse
 	case "monthly":
 		periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE period = ? AND period_start = ?
-			ORDER BY rank ASC
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end,
+				le.rank, le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.period = ? AND le.period_start = ?
+			ORDER BY le.rank ASC
 			LIMIT ?
 		`
 		args = []interface{}{period, periodStart.Format("2006-01-02"), limit}
 
 	case "all_time":
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE period = ?
-			ORDER BY rank ASC
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end,
+				le.rank, le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.period = ?
+			ORDER BY le.rank ASC
 			LIMIT ?
 		`
 		args = []interface{}{period, limit}
@@ -403,6 +630,7 @@ func (s *Service) GetLeaderboard(period string, limit int) (*LeaderboardResponse
 			&periodStartStr, &periodEndStr, &entry.Rank,
 			&entry.Score, &entry.Confidence, &entry.InputType,
 			&entry.IsPublic, &entry.CreatedAt,
+			&entry.DisplayName, &entry.GitHubUsername, &entry.XUsername,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan leaderboard entry: %w", err)
@@ -451,10 +679,13 @@ func (s *Service) GetDeveloperRank(developerHash, period string) (*LeaderboardEn
 	case "daily":
 		periodStart := now.Truncate(24 * time.Hour)
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE developer_hash = ? AND period = ? AND period_start = ?
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end, le.rank,
+				le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.developer_hash = ? AND le.period = ? AND le.period_start = ?
 		`
 		args = []interface{}{developerHash, period, periodStart.Format("2006-01-02")}
 
@@ -462,29 +693,38 @@ func (s *Service) GetDeveloperRank(developerHash, period string) (*LeaderboardEn
 		days := int(now.Weekday()-time.Monday) % 7
 		periodStart := now.AddDate(0, 0, -days).Truncate(24 * time.Hour)
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE developer_hash = ? AND period = ? AND period_start = ?
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end, le.rank,
+				le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.developer_hash = ? AND le.period = ? AND le.period_start = ?
 		`
 		args = []interface{}{developerHash, period, periodStart.Format("2006-01-02")}
 
 	case "monthly":
 		periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE developer_hash = ? AND period = ? AND period_start = ?
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end, le.rank,
+				le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.developer_hash = ? AND le.period = ? AND le.period_start = ?
 		`
 		args = []interface{}{developerHash, period, periodStart.Format("2006-01-02")}
 
 	case "all_time":
 		query = `
-			SELECT id, developer_hash, period, period_start, period_end, rank,
-				   score, confidence, input_type, is_public, created_at
-			FROM leaderboard_entries
-			WHERE developer_hash = ? AND period = ?
+			SELECT 
+				le.id, le.developer_hash, le.period, le.period_start, le.period_end, le.rank,
+				le.score, le.confidence, le.input_type, le.is_public, le.created_at,
+				da.display_name, da.github_username, da.x_username
+			FROM leaderboard_entries le
+			LEFT JOIN developer_analyses da ON le.developer_hash = da.developer_hash
+			WHERE le.developer_hash = ? AND le.period = ?
 		`
 		args = []interface{}{developerHash, period}
 
@@ -500,6 +740,7 @@ func (s *Service) GetDeveloperRank(developerHash, period string) (*LeaderboardEn
 		&periodStartStr, &periodEndStr, &entry.Rank,
 		&entry.Score, &entry.Confidence, &entry.InputType,
 		&entry.IsPublic, &entry.CreatedAt,
+		&entry.DisplayName, &entry.GitHubUsername, &entry.XUsername,
 	)
 
 	if err != nil {

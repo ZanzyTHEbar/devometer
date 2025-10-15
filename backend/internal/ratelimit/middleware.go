@@ -2,26 +2,32 @@ package ratelimit
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/ZanzyTHEbar/cracked-dev-o-meter/internal/database"
 	"github.com/gin-gonic/gin"
 )
 
-// IPRateLimitMiddleware creates middleware for IP-based rate limiting
+// IPRateLimitMiddleware creates middleware for per-IP rate limiting
 func (rl *RateLimiter) IPRateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		ip := c.ClientIP()
 
+		// Create rate limit key for IP
+		key := fmt.Sprintf("ratelimit:ip:%s", ip)
+
+		// Define rate limit (60 requests per minute)
+		limit := Rate{
+			Limit:  rl.config.IPLimit,
+			Period: time.Minute,
+		}
+
 		// Check rate limit
-		result, err := rl.AllowIP(ctx, ip)
+		result, err := rl.Allow(ctx, key, limit)
 		if err != nil {
-			// Log error but don't block request on rate limiter failure
-			slog.Error("Rate limit check failed", "ip", ip, "error", err)
+			// On error, log but don't block (fail open for better availability)
 			c.Next()
 			return
 		}
@@ -31,33 +37,31 @@ func (rl *RateLimiter) IPRateLimitMiddleware() gin.HandlerFunc {
 		c.Header("X-RateLimit-Remaining", strconv.Itoa(result.Remaining))
 		c.Header("X-RateLimit-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
 
-		// Check if request is allowed
+		// If rate limit exceeded, return 429
 		if !result.Allowed {
-			// Increment metrics
+			// Track rate limit block
 			if rl.metrics != nil {
 				rl.metrics.IncrementRateLimitIPBlock()
 			}
 
-			// Add Retry-After header
 			c.Header("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
-
-			// Return 429 Too Many Requests
 			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       "rate limit exceeded for IP",
-				"message":     fmt.Sprintf("You have exceeded the rate limit of %d requests per minute", result.Limit),
-				"retry_after": int(result.RetryAfter.Seconds()),
-				"reset_at":    result.ResetAt.Unix(),
+				"error":       "rate limit exceeded",
+				"message":     fmt.Sprintf("Too many requests from IP %s", ip),
+				"retry_after": result.RetryAfter.Seconds(),
+				"limit":       result.Limit,
+				"period":      "1 minute",
 			})
 			c.Abort()
 			return
 		}
 
-		// Request allowed, continue
 		c.Next()
 	}
 }
 
-// UserRateLimitMiddleware creates middleware for user-based rate limiting
+// UserRateLimitMiddleware creates middleware for per-user rate limiting
+// This is applied to specific endpoints that require user tracking
 func (rl *RateLimiter) UserRateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Only apply to analyze endpoints
@@ -66,114 +70,119 @@ func (rl *RateLimiter) UserRateLimitMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Get user ID from context (set by security middleware)
+		ctx := c.Request.Context()
+
+		// Get user ID from context (set by auth middleware or user tracking)
 		userID, exists := c.Get("user_id")
 		if !exists {
-			// No user ID, skip user rate limiting
+			// If no user ID, skip user rate limiting (rely on IP limiting)
 			c.Next()
 			return
 		}
 
 		userIDStr, ok := userID.(string)
 		if !ok {
-			slog.Warn("Invalid user ID type in context")
 			c.Next()
 			return
 		}
 
-		ctx := c.Request.Context()
-
-		// Check if user is paid (paid users bypass weekly limits)
-		isPaid := false
-		if userStats, exists := c.Get("user_stats"); exists {
-			if stats, ok := userStats.(*database.UsageStats); ok {
-				isPaid = stats.IsPaid
+		// Check if user is paid (skip rate limiting for paid users)
+		userStats, exists := c.Get("user_stats")
+		if exists {
+			if stats, ok := userStats.(map[string]interface{}); ok {
+				if isPaid, ok := stats["is_paid"].(bool); ok && isPaid {
+					// Paid user - no rate limit
+					c.Next()
+					return
+				}
 			}
 		}
 
-		if isPaid {
-			// Paid users have unlimited access
-			c.Header("X-RateLimit-User-Limit", "unlimited")
-			c.Header("X-RateLimit-User-Remaining", "unlimited")
-			c.Next()
-			return
+		// Create rate limit key for user
+		key := fmt.Sprintf("ratelimit:user:%s:week", userIDStr)
+
+		// Define rate limit (5 requests per week for free users)
+		limit := Rate{
+			Limit:  rl.config.UserLimit,
+			Period: 7 * 24 * time.Hour, // 1 week
 		}
 
-		// Check user rate limit
-		result, err := rl.AllowUser(ctx, userIDStr)
+		// Check rate limit
+		result, err := rl.Allow(ctx, key, limit)
 		if err != nil {
-			// Log error but don't block request on rate limiter failure
-			slog.Error("User rate limit check failed", "user_id", userIDStr[:8]+"...", "error", err)
+			// On error, log but don't block
 			c.Next()
 			return
 		}
 
-		// Inject user-specific rate limit headers
+		// Inject rate limit headers
 		c.Header("X-RateLimit-User-Limit", strconv.Itoa(result.Limit))
 		c.Header("X-RateLimit-User-Remaining", strconv.Itoa(result.Remaining))
 		c.Header("X-RateLimit-User-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
 
-		// Check if request is allowed
+		// If rate limit exceeded, return 429
 		if !result.Allowed {
-			// Increment metrics
+			// Track rate limit block
 			if rl.metrics != nil {
 				rl.metrics.IncrementRateLimitUserBlock()
 			}
 
-			// Add Retry-After header
 			c.Header("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
-
-			// Return 429 with upgrade information
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":              "weekly request limit exceeded",
-				"message":            fmt.Sprintf("You have used all %d free requests this week", result.Limit),
+				"message":            "You've used all 5 free requests this week",
 				"remaining_requests": result.Remaining,
-				"reset_at":           result.ResetAt.Unix(),
-				"retry_after":        int(result.RetryAfter.Seconds()),
+				"retry_after":        result.RetryAfter.Seconds(),
+				"limit":              result.Limit,
+				"period":             "1 week",
+				"reset_at":           result.ResetAt.Format(time.RFC3339),
 				"upgrade_url":        "/upgrade",
-				"upgrade_message":    "Upgrade to unlimited access",
 			})
 			c.Abort()
 			return
 		}
 
-		// Request allowed, continue
 		c.Next()
 	}
 }
 
-// EndpointRateLimitMiddleware creates middleware for endpoint-specific rate limiting
-func (rl *RateLimiter) EndpointRateLimitMiddleware(endpoint string, limit int) gin.HandlerFunc {
+// EndpointRateLimitMiddleware creates middleware for per-endpoint rate limiting
+// This allows different rate limits for different endpoints
+func (rl *RateLimiter) EndpointRateLimitMiddleware(endpoint string, limit Rate) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		ip := c.ClientIP()
 
-		// Create endpoint-specific key
-		key := fmt.Sprintf("ratelimit:endpoint:%s:%s", endpoint, ip)
+		// Create rate limit key for endpoint + IP
+		key := fmt.Sprintf("ratelimit:endpoint:%s:ip:%s", endpoint, ip)
 
-		// Use custom limit for this endpoint
-		result, err := rl.allow(ctx, key, limit, 60*time.Second) // Per minute
+		// Check rate limit
+		result, err := rl.Allow(ctx, key, limit)
 		if err != nil {
-			slog.Error("Endpoint rate limit check failed", "endpoint", endpoint, "ip", ip, "error", err)
+			// On error, log but don't block
 			c.Next()
 			return
 		}
 
-		// Inject headers
+		// Inject rate limit headers
 		c.Header("X-RateLimit-Endpoint-Limit", strconv.Itoa(result.Limit))
 		c.Header("X-RateLimit-Endpoint-Remaining", strconv.Itoa(result.Remaining))
+		c.Header("X-RateLimit-Endpoint-Reset", strconv.FormatInt(result.ResetAt.Unix(), 10))
 
+		// If rate limit exceeded, return 429
 		if !result.Allowed {
-			// Increment metrics
+			// Track rate limit block
 			if rl.metrics != nil {
 				rl.metrics.IncrementRateLimitEndpoint(endpoint)
 			}
 
 			c.Header("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
 			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       fmt.Sprintf("rate limit exceeded for endpoint: %s", endpoint),
-				"message":     fmt.Sprintf("You have exceeded the rate limit of %d requests per minute for this endpoint", result.Limit),
-				"retry_after": int(result.RetryAfter.Seconds()),
+				"error":       "endpoint rate limit exceeded",
+				"message":     fmt.Sprintf("Too many requests to %s", endpoint),
+				"retry_after": result.RetryAfter.Seconds(),
+				"limit":       result.Limit,
+				"endpoint":    endpoint,
 			})
 			c.Abort()
 			return
@@ -183,3 +192,39 @@ func (rl *RateLimiter) EndpointRateLimitMiddleware(endpoint string, limit int) g
 	}
 }
 
+// GlobalRateLimitMiddleware creates middleware for global rate limiting
+// This is useful for protecting against distributed attacks
+func (rl *RateLimiter) GlobalRateLimitMiddleware(limit Rate) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+
+		// Use a global key
+		key := "ratelimit:global"
+
+		// Check rate limit
+		result, err := rl.Allow(ctx, key, limit)
+		if err != nil {
+			// On error, log but don't block
+			c.Next()
+			return
+		}
+
+		// Inject rate limit headers
+		c.Header("X-RateLimit-Global-Limit", strconv.Itoa(result.Limit))
+		c.Header("X-RateLimit-Global-Remaining", strconv.Itoa(result.Remaining))
+
+		// If rate limit exceeded, return 503 (Service Unavailable)
+		if !result.Allowed {
+			c.Header("Retry-After", strconv.Itoa(int(result.RetryAfter.Seconds())))
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":       "service temporarily unavailable",
+				"message":     "Server is experiencing high load, please try again later",
+				"retry_after": result.RetryAfter.Seconds(),
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}

@@ -161,9 +161,12 @@ func (db *DB) migrate() error {
 			breakdown TEXT, -- JSON breakdown of categories
 			github_username TEXT,
 			x_username TEXT,
+			display_name TEXT, -- User-provided display name
 			ip_address TEXT NOT NULL,
 			user_agent TEXT,
 			is_public BOOLEAN DEFAULT FALSE, -- Whether to show on public leaderboard
+			leaderboard_opt_in_status TEXT DEFAULT 'pending', -- 'pending', 'accepted', 'declined'
+			leaderboard_opt_in_at DATETIME, -- When user opted in/out
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
@@ -191,6 +194,19 @@ func (db *DB) migrate() error {
 			created_at DATETIME NOT NULL
 		)`,
 
+		// Analysis history table for weighted scoring
+		`CREATE TABLE IF NOT EXISTS analysis_history (
+			id TEXT PRIMARY KEY,
+			developer_hash TEXT NOT NULL,
+			analysis_id TEXT NOT NULL,
+			score REAL NOT NULL,
+			confidence REAL NOT NULL,
+			input_type TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			FOREIGN KEY (developer_hash) REFERENCES developer_analyses(developer_hash),
+			FOREIGN KEY (analysis_id) REFERENCES developer_analyses(id)
+		)`,
+
 		// Indexes for performance
 		`CREATE INDEX IF NOT EXISTS idx_users_ip ON users(ip_address)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_logs_user_id ON request_logs(user_id)`,
@@ -203,6 +219,8 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_leaderboard_entries_rank ON leaderboard_entries(period, period_start, rank)`,
 		`CREATE INDEX IF NOT EXISTS idx_leaderboard_cache_key ON leaderboard_cache(cache_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_leaderboard_cache_expires ON leaderboard_cache(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_analysis_history_hash ON analysis_history(developer_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_analysis_history_created ON analysis_history(created_at DESC)`,
 	}
 
 	for _, query := range queries {
@@ -234,9 +252,9 @@ func (db *DB) initPreparedStatements() error {
 
 		"insert_analysis": `INSERT INTO developer_analyses (
 			id, developer_hash, input_type, input_value, score, confidence, posterior,
-			breakdown, github_username, x_username, ip_address, user_agent,
-			is_public, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			breakdown, github_username, x_username, display_name, ip_address, user_agent,
+			is_public, leaderboard_opt_in_status, leaderboard_opt_in_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(developer_hash) DO UPDATE SET
 			score = excluded.score,
 			confidence = excluded.confidence,

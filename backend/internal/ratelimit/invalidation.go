@@ -10,161 +10,207 @@ import (
 )
 
 // InvalidateUser removes all rate limit keys for a specific user
-// Used when user upgrades to paid plan or when manually resetting limits
+// This is useful when a user upgrades to paid tier or when resetting their limits
 func (rl *RateLimiter) InvalidateUser(ctx context.Context, userID string) error {
 	if !rl.redisClient.IsEnabled() {
-		// For in-memory fallback, remove the specific limiters
+		// For in-memory, remove the user's limiter
 		rl.fallbackMutex.Lock()
 		defer rl.fallbackMutex.Unlock()
-		
-		// Remove user week key
-		weekKey := fmt.Sprintf("ratelimit:user:%s:week", userID)
-		delete(rl.fallbackLimiters, weekKey)
-		
-		slog.Info("Invalidated user rate limits (in-memory)", "user_id", userID[:8]+"...")
+
+		pattern := fmt.Sprintf("ratelimit:user:%s:", userID)
+		for key := range rl.fallbackLimiters {
+			if len(key) >= len(pattern) && key[:len(pattern)] == pattern {
+				delete(rl.fallbackLimiters, key)
+			}
+		}
+
+		slog.Info("User rate limit invalidated (in-memory)", "user_id", userID)
 		return nil
 	}
 
-	// Delete all keys matching the user pattern
+	// For Redis, delete all keys matching the user pattern
 	pattern := fmt.Sprintf("ratelimit:user:%s:*", userID)
-	return rl.deleteByPattern(ctx, pattern)
-}
-
-// InvalidateIP removes all rate limit keys for a specific IP address
-// Used for manual IP ban/unban or limit resets
-func (rl *RateLimiter) InvalidateIP(ctx context.Context, ip string) error {
-	if !rl.redisClient.IsEnabled() {
-		// For in-memory fallback, remove the specific limiter
-		rl.fallbackMutex.Lock()
-		defer rl.fallbackMutex.Unlock()
-		
-		ipKey := fmt.Sprintf("ratelimit:ip:%s", ip)
-		delete(rl.fallbackLimiters, ipKey)
-		
-		slog.Info("Invalidated IP rate limits (in-memory)", "ip", ip)
-		return nil
+	err := rl.deleteByPattern(ctx, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to invalidate user rate limits: %w", err)
 	}
 
-	// Delete all keys matching the IP pattern
-	pattern := fmt.Sprintf("ratelimit:ip:%s*", ip)
-	return rl.deleteByPattern(ctx, pattern)
-}
-
-// ResetOnUpgrade immediately resets limits when a user upgrades to paid
-func (rl *RateLimiter) ResetOnUpgrade(ctx context.Context, userID string) error {
-	slog.Info("Resetting rate limits for user upgrade", "user_id", userID[:8]+"...")
-	return rl.InvalidateUser(ctx, userID)
-}
-
-// BumpVersion forces all clients to restart their limit window
-// Used for emergency rate limit policy changes
-func (rl *RateLimiter) BumpVersion(ctx context.Context, scope string) error {
-	if !rl.redisClient.IsEnabled() {
-		slog.Warn("Version bumping not available in fallback mode", "scope", scope)
-		return fmt.Errorf("version bumping requires Redis")
-	}
-
-	versionKey := fmt.Sprintf("ratelimit:version:%s", scope)
-	result := rl.redisClient.GetClient().Incr(ctx, versionKey)
-	if result.Err() != nil {
-		return fmt.Errorf("failed to bump version: %w", result.Err())
-	}
-
-	newVersion := result.Val()
-	slog.Info("Bumped rate limit version", "scope", scope, "version", newVersion)
+	slog.Info("User rate limit invalidated (Redis)", "user_id", userID)
 	return nil
 }
 
-// GetVersion returns the current version for a scope
-func (rl *RateLimiter) GetVersion(ctx context.Context, scope string) (int64, error) {
+// InvalidateIP removes all rate limit keys for a specific IP address
+// This is useful for removing rate limits on trusted IPs or after an IP ban is lifted
+func (rl *RateLimiter) InvalidateIP(ctx context.Context, ip string) error {
 	if !rl.redisClient.IsEnabled() {
-		return 0, fmt.Errorf("version tracking requires Redis")
+		// For in-memory, remove the IP's limiter
+		rl.fallbackMutex.Lock()
+		defer rl.fallbackMutex.Unlock()
+
+		pattern := fmt.Sprintf("ratelimit:ip:%s:", ip)
+		for key := range rl.fallbackLimiters {
+			if len(key) >= len(pattern) && key[:len(pattern)] == pattern {
+				delete(rl.fallbackLimiters, key)
+			}
+		}
+
+		slog.Info("IP rate limit invalidated (in-memory)", "ip", ip)
+		return nil
+	}
+
+	// For Redis, delete all keys matching the IP pattern
+	pattern := fmt.Sprintf("ratelimit:ip:%s:*", ip)
+	err := rl.deleteByPattern(ctx, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to invalidate IP rate limits: %w", err)
+	}
+
+	slog.Info("IP rate limit invalidated (Redis)", "ip", ip)
+	return nil
+}
+
+// BumpVersion forces all clients to restart their limit window for a given scope
+// This is useful for rolling out new rate limit policies
+func (rl *RateLimiter) BumpVersion(ctx context.Context, scope string) error {
+	if !rl.redisClient.IsEnabled() {
+		slog.Warn("Version bumping not supported in in-memory mode", "scope", scope)
+		return nil
 	}
 
 	versionKey := fmt.Sprintf("ratelimit:version:%s", scope)
-	result := rl.redisClient.GetClient().Get(ctx, versionKey)
-	
-	if result.Err() == redis.Nil {
-		// Key doesn't exist, version is 0
-		return 0, nil
-	}
-	
-	if result.Err() != nil {
-		return 0, fmt.Errorf("failed to get version: %w", result.Err())
-	}
-
-	version, err := result.Int64()
+	err := rl.redisClient.Client().Incr(ctx, versionKey).Err()
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse version: %w", err)
+		return fmt.Errorf("failed to bump version: %w", err)
 	}
 
-	return version, nil
+	slog.Info("Rate limit version bumped", "scope", scope)
+	return nil
 }
 
-// deleteByPattern deletes all Redis keys matching a pattern
-func (rl *RateLimiter) deleteByPattern(ctx context.Context, pattern string) error {
-	client := rl.redisClient.GetClient()
+// ResetOnUpgrade immediately resets rate limits when a user upgrades to paid tier
+// This removes the weekly limit key so they can start using unlimited access immediately
+func (rl *RateLimiter) ResetOnUpgrade(ctx context.Context, userID string) error {
+	if !rl.redisClient.IsEnabled() {
+		// For in-memory, remove the user's week limiter
+		rl.fallbackMutex.Lock()
+		defer rl.fallbackMutex.Unlock()
 
-	// Use SCAN to find matching keys (more efficient than KEYS)
+		weekKey := fmt.Sprintf("ratelimit:user:%s:week", userID)
+		delete(rl.fallbackLimiters, weekKey)
+
+		slog.Info("User rate limit reset on upgrade (in-memory)", "user_id", userID)
+		return nil
+	}
+
+	// For Redis, delete the weekly limit key
+	weekKey := fmt.Sprintf("ratelimit:user:%s:week", userID)
+	err := rl.redisClient.Client().Del(ctx, weekKey).Err()
+	if err != nil {
+		return fmt.Errorf("failed to reset user rate limit on upgrade: %w", err)
+	}
+
+	slog.Info("User rate limit reset on upgrade (Redis)", "user_id", userID, "key", weekKey)
+	return nil
+}
+
+// InvalidateAll removes all rate limit keys (nuclear option for debugging/testing)
+// Use with extreme caution in production
+func (rl *RateLimiter) InvalidateAll(ctx context.Context) error {
+	if !rl.redisClient.IsEnabled() {
+		// For in-memory, clear all limiters
+		rl.fallbackMutex.Lock()
+		defer rl.fallbackMutex.Unlock()
+
+		count := len(rl.fallbackLimiters)
+		rl.fallbackLimiters = make(map[string]*rate.Limiter)
+
+		slog.Warn("All rate limits invalidated (in-memory)", "count", count)
+		return nil
+	}
+
+	// For Redis, delete all ratelimit keys
+	pattern := "ratelimit:*"
+	err := rl.deleteByPattern(ctx, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to invalidate all rate limits: %w", err)
+	}
+
+	slog.Warn("All rate limits invalidated (Redis)")
+	return nil
+}
+
+// deleteByPattern deletes all Redis keys matching a pattern using SCAN for safety
+func (rl *RateLimiter) deleteByPattern(ctx context.Context, pattern string) error {
+	if !rl.redisClient.IsEnabled() {
+		return fmt.Errorf("redis not enabled")
+	}
+
+	client := rl.redisClient.Client()
 	var cursor uint64
 	var deletedCount int
 
+	// Use SCAN to iterate through matching keys safely (doesn't block Redis)
 	for {
-		keys, nextCursor, err := client.Scan(ctx, cursor, pattern, 100).Result()
+		var keys []string
+		var err error
+
+		// Scan for keys matching the pattern
+		keys, cursor, err = client.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
-			return fmt.Errorf("failed to scan keys: %w", err)
+			return fmt.Errorf("scan failed: %w", err)
 		}
 
-		// Delete found keys
+		// Delete matching keys
 		if len(keys) > 0 {
-			deleted, err := client.Del(ctx, keys...).Result()
-			if err != nil {
-				return fmt.Errorf("failed to delete keys: %w", err)
+			pipe := client.Pipeline()
+			for _, key := range keys {
+				pipe.Del(ctx, key)
 			}
-			deletedCount += int(deleted)
+			_, err = pipe.Exec(ctx)
+			if err != nil && err != redis.Nil {
+				return fmt.Errorf("delete failed: %w", err)
+			}
+			deletedCount += len(keys)
 		}
 
-		cursor = nextCursor
+		// Check if we've scanned all keys
 		if cursor == 0 {
 			break
 		}
 	}
 
-	slog.Info("Deleted rate limit keys by pattern", "pattern", pattern, "count", deletedCount)
+	slog.Info("Redis keys deleted", "pattern", pattern, "count", deletedCount)
 	return nil
 }
 
-// InvalidateAll removes all rate limit keys (emergency use only)
-func (rl *RateLimiter) InvalidateAll(ctx context.Context) error {
+// GetKeyCount returns the number of rate limit keys in Redis
+func (rl *RateLimiter) GetKeyCount(ctx context.Context) (int, error) {
 	if !rl.redisClient.IsEnabled() {
-		// For in-memory fallback, clear everything
-		rl.fallbackMutex.Lock()
-		defer rl.fallbackMutex.Unlock()
-		
-		count := len(rl.fallbackLimiters)
-		rl.fallbackLimiters = make(map[string]*rate.Limiter)
-		
-		slog.Warn("Invalidated all rate limits (in-memory)", "count", count)
-		return nil
+		rl.fallbackMutex.RLock()
+		defer rl.fallbackMutex.RUnlock()
+		return len(rl.fallbackLimiters), nil
 	}
 
-	// Delete all rate limit keys
-	pattern := "ratelimit:*"
-	slog.Warn("Invalidating ALL rate limits", "pattern", pattern)
-	return rl.deleteByPattern(ctx, pattern)
-}
+	client := rl.redisClient.Client()
+	var cursor uint64
+	var count int
 
-// CleanupExpired removes expired keys (Redis handles this automatically via TTL)
-// This is a no-op for Redis but provides consistency with the interface
-func (rl *RateLimiter) CleanupExpired(ctx context.Context) error {
-	if !rl.redisClient.IsEnabled() {
-		// For in-memory, we rely on the periodic cleanup goroutine
-		slog.Debug("Cleanup triggered (handled by periodic goroutine)")
-		return nil
+	// Use SCAN to count all ratelimit keys
+	for {
+		var keys []string
+		var err error
+
+		keys, cursor, err = client.Scan(ctx, cursor, "ratelimit:*", 100).Result()
+		if err != nil {
+			return 0, fmt.Errorf("scan failed: %w", err)
+		}
+
+		count += len(keys)
+
+		if cursor == 0 {
+			break
+		}
 	}
 
-	// Redis handles expiration automatically via TTL
-	slog.Debug("Cleanup triggered (Redis handles TTL automatically)")
-	return nil
+	return count, nil
 }
-

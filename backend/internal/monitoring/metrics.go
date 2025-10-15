@@ -42,12 +42,12 @@ type Metrics struct {
 	HeapSys        int64
 
 	// Rate limit metrics
-	RateLimitIPBlocks      int64
-	RateLimitUserBlocks    int64
-	RateLimitRedisErrors   int64
-	RateLimitFallbackCount int64
+	RateLimitIPBlocks       int64
+	RateLimitUserBlocks     int64
+	RateLimitRedisErrors    int64
+	RateLimitFallbackCount  int64
 	RateLimitEndpointBlocks map[string]int64
-	RateLimitMutex         sync.RWMutex
+	RateLimitMutex          sync.RWMutex
 }
 
 // NewMetrics creates a new metrics instance
